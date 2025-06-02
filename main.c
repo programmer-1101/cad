@@ -166,7 +166,6 @@ void saveCircuit(char *file_name, ComponentArray *array)
         }
 
         cJSON_AddNumberToObject(component_obj, "id", array->data[i].data.powersupply.id);
-        cJSON_AddStringToObject(component_obj, "type", "");
 
         switch (array->data[i].type)
         {
@@ -238,7 +237,7 @@ int main()
     {
         char item_type_char;
         printf("\nEnter what to do\n");
-        printf("A: Power Supply\tB: Resistor\tC: Transistor\tD: LED\tL: List Components\tS: Save\tQ: Quit\n");
+        printf("A: Power Supply\nB: Resistor\nC: Transistor\nD: LED\nL: List Components\nS: Save\nF: Load From File:\nQ: Quit\n");
 
         if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL)
         {
@@ -395,8 +394,159 @@ int main()
             }
             break;
 
+        case 'F':
+            char load_file_name[256];
+            printf("Enter filename to save (e.g., circuit.json):\t");
+            if (fgets(load_file_name, sizeof(load_file_name), stdin) == NULL)
+            {
+                fprintf(stderr, "Error reading filename.\n");
+                break;
+            }
+            load_file_name[strcspn(load_file_name, "\n")] = 0;
+
+            FILE *fp = fopen(load_file_name, "r");
+            if (fp == NULL)
+            {
+                printf("Error: Unable to open the file.\n");
+                return 1;
+            }
+
+            // read the file contents into a string
+            fseek(fp, 0, SEEK_END);
+            long filesize = ftell(fp);
+            rewind(fp);
+
+            char *buffer = malloc(filesize + 1);
+            fread(buffer, 1, filesize, fp);
+            buffer[filesize] = '\0';
+            fclose(fp);
+
+            // parse the JSON data
+            cJSON *json = cJSON_Parse(buffer);
+
+            free(buffer);
+
+            if (json == NULL)
+            {
+                const char *error_ptr = cJSON_GetErrorPtr();
+                if (error_ptr != NULL)
+                {
+                    printf("Error: %s\n", error_ptr);
+                }
+                return 1;
+            }
+
+            printf("%s", json->type);
+
+            // Clear existing data
+            freeComponentArray(&component_array);
+            component_array.size = 0;
+            component_array.capacity = 1;
+            component_array.data = (Component *)malloc(component_array.capacity * sizeof(Component));
+
+            cJSON *components = cJSON_GetObjectItem(json, "components");
+            if (!cJSON_IsArray(components))
+            {
+                printf("Invalid format: 'components' is not an array.\n");
+                cJSON_Delete(json);
+                break;
+            }
+
+            cJSON *component_json = NULL;
+            cJSON_ArrayForEach(component_json, components)
+            {
+                Component new_component = {0};
+
+                cJSON *type = cJSON_GetObjectItem(component_json, "type");
+                cJSON *id = cJSON_GetObjectItem(component_json, "id");
+
+                if (!cJSON_IsString(type) || !cJSON_IsNumber(id))
+                    continue;
+
+                if (strcmp(type->valuestring, "PowerSupply") == 0)
+                {
+                    new_component.type = POWERSUPPLY;
+                    new_component.data.powersupply.id = id->valueint;
+                    new_component.data.powersupply.voltage = cJSON_GetObjectItem(component_json, "voltage")->valuedouble;
+                }
+                else if (strcmp(type->valuestring, "Resistor") == 0)
+                {
+                    new_component.type = RESISTOR;
+                    new_component.data.resistor.id = id->valueint;
+                    new_component.data.resistor.resistance = cJSON_GetObjectItem(component_json, "resistance")->valuedouble;
+
+                    cJSON *output_type = cJSON_GetObjectItem(component_json, "output_type");
+                    if (cJSON_IsString(output_type) && strcmp(output_type->valuestring, "Current") == 0)
+                        new_component.data.resistor.output = CALC_CURRENT;
+                    else
+                        new_component.data.resistor.output = CALC_VOLTAGE;
+                }
+                else if (strcmp(type->valuestring, "Transistor") == 0)
+                {
+                    new_component.type = TRANSISTOR;
+                    new_component.data.transistor.id = id->valueint;
+
+                    cJSON *trans_type = cJSON_GetObjectItem(component_json, "transistor_type");
+                    cJSON *io_format = cJSON_GetObjectItem(component_json, "input_output_format");
+
+                    new_component.data.transistor.type = (cJSON_IsString(trans_type) && strcmp(trans_type->valuestring, "PNP") == 0);
+                    new_component.data.transistor.input_type = (cJSON_IsString(io_format) && strcmp(io_format->valuestring, "Current") == 0);
+                }
+
+                addComponent(&component_array, new_component);
+            }
+
+            cJSON_Delete(json);
+            printf("Loaded %zu components from file.\n", component_array.size);
+
+            printf("\n--- Current Circuit Components ---\n");
+            for (size_t i = 0; i < component_array.size; i++)
+            {
+                Component current_comp = getComponent(&component_array, i);
+                printf("ID: ");
+                switch (current_comp.type)
+                {
+                case POWERSUPPLY:
+                    printf("%d, Type: Power Supply, Voltage: %.2fV\n",
+                           current_comp.data.powersupply.id,
+                           current_comp.data.powersupply.voltage);
+                    break;
+                case RESISTOR:
+                    printf("%d, Type: Resistor, Resistance: %.2f Ohms, Output: %s\n",
+                           current_comp.data.resistor.id,
+                           current_comp.data.resistor.resistance,
+                           current_comp.data.resistor.output == CALC_VOLTAGE ? "Voltage" : "Current");
+                    break;
+                case TRANSISTOR:
+                    printf("%d, Type: Transistor, Type: %s, Input Format: %s\n",
+                           current_comp.data.transistor.id,
+                           current_comp.data.transistor.type ? "PNP" : "NPN",
+                           current_comp.data.transistor.input_type ? "Current" : "Voltage");
+                    break;
+                }
+
+                switch (current_comp.type)
+                {
+                case POWERSUPPLY:
+                    printf("Power Supply, Voltage: %.2fV\n", current_comp.data.powersupply.voltage);
+                    break;
+                case RESISTOR:
+                    printf("Resistor, Resistance: %.2f Ohms, Output: %s\n",
+                           current_comp.data.resistor.resistance,
+                           current_comp.data.resistor.output == CALC_VOLTAGE ? "Voltage" : "Current");
+                    break;
+                case TRANSISTOR:
+                    printf("Transistor, Type: %s, Input Format: %s\n",
+                           current_comp.data.transistor.type ? "PNP" : "NPN",
+                           current_comp.data.transistor.input_type ? "Current" : "Voltage");
+                    break;
+                    
+                }
+            }
+            printf("----------------------------------\n");
+            break;
         default:
-            printf("A: Power Supply\tB: Resistor\tC: Transistor\tD: LED\tL: List Components\tS: Save\tQ: Quit\n");
+            printf("A: Power Supply\nB: Resistor\nC: Transistor\nD: LED\nL: List Components\nS: Save\nQ: Quit\n");
             break;
         }
     }
