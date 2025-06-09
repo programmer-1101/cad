@@ -1,0 +1,23 @@
+{
+	"components":	[{
+			"id":	0,
+			"type":	"PowerSupply",
+			"voltage":	10,
+			"pin1":	1
+		}, {
+			"id":	1,
+			"type":	"Resistor",
+			"resistance":	100,
+			"output_type":	"Current",
+			"pin1":	0,
+			"pin2":	2
+		}, {
+			"id":	2,
+			"type":	"Transistor",
+			"transistor_type":	"PNP",
+			"input_output_format":	"Voltage",
+			"pin1":	1,
+			"pin2":	1,
+			"pin3":	-1
+		}]
+}

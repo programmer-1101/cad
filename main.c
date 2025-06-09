@@ -18,6 +18,7 @@ typedef struct
     int cathode;
     int id;
     double voltage;
+    int pin1;
 } Powersupply;
 
 typedef struct
@@ -42,7 +43,7 @@ typedef struct
     bool input_type;
     double input;
     double base;
- Remove-Item $env:LOCALAPPDATA\nvim\.git -Recurse -Force   double output;
+    double output;
     int pin1;
     int pin2;
     int pin3;
@@ -97,18 +98,18 @@ void freeComponentArray(ComponentArray *arr)
     arr->size = arr->capacity = 0;
 }
 
-double resistor(double resistance, double input, bool type)
+double resistor_calc(double resistance, double input, int otype)
 {
-    return type ? (input * resistance) : (input / resistance);
+    return otype == CALC_VOLTAGE ? (input * resistance) : (input / resistance);
 }
 
-double transistor(double control, double base, bool is_NPN, bool return_collector)
+double transistor_calc(double input, double base, bool is_NPN, bool input_type)
 {
     double beta = 100.0;
-    if (is_NPN && base > 0.00001)
-        return return_collector ? beta * base : control + 0.7;
-    else if (!is_NPN && base < -0.00001)
-        return return_collector ? beta * -base : control - 0.7;
+    if (is_NPN && base > 0.7)
+        return input_type ? beta * base : input - 0.7;
+    else if (!is_NPN && base < -0.7)
+        return input_type ? beta * -base : input + 0.7;
     return 0.0;
 }
 
@@ -142,23 +143,29 @@ void saveCircuit(char *file_name, ComponentArray *array)
         if (!obj)
             continue;
 
-        cJSON_AddNumberToObject(obj, "id", comp->data.powersupply.id);
+        cJSON_AddNumberToObject(obj, "id", i);
 
         switch (comp->type)
         {
         case POWERSUPPLY:
             cJSON_AddStringToObject(obj, "type", "PowerSupply");
             cJSON_AddNumberToObject(obj, "voltage", comp->data.powersupply.voltage);
+            cJSON_AddNumberToObject(obj, "pin1", comp->data.powersupply.pin1);
             break;
         case RESISTOR:
             cJSON_AddStringToObject(obj, "type", "Resistor");
             cJSON_AddNumberToObject(obj, "resistance", comp->data.resistor.resistance);
-            cJSON_AddStringToObject(obj, "output_type", comp->data.resistor.output == CALC_VOLTAGE ? "Voltage" : "Current");
+            cJSON_AddStringToObject(obj, "output_type", comp->data.resistor.otype == CALC_VOLTAGE ? "Voltage" : "Current");
+            cJSON_AddNumberToObject(obj, "pin1", comp->data.resistor.pin1);
+            cJSON_AddNumberToObject(obj, "pin2", comp->data.resistor.pin2);
             break;
         case TRANSISTOR:
             cJSON_AddStringToObject(obj, "type", "Transistor");
             cJSON_AddStringToObject(obj, "transistor_type", comp->data.transistor.type ? "PNP" : "NPN");
             cJSON_AddStringToObject(obj, "input_output_format", comp->data.transistor.input_type ? "Current" : "Voltage");
+            cJSON_AddNumberToObject(obj, "pin1", comp->data.transistor.pin1);
+            cJSON_AddNumberToObject(obj, "pin2", comp->data.transistor.pin2);
+            cJSON_AddNumberToObject(obj, "pin3", comp->data.transistor.pin3);
             break;
         }
 
@@ -227,7 +234,7 @@ void loadCircuit(const char *file_name, ComponentArray *array)
     }
 
     freeComponentArray(array);
-    array->capacity = 1;
+    array->capacity = cJSON_GetArraySize(components) + 1;
     array->data = malloc(array->capacity * sizeof(Component));
     array->size = 0;
 
@@ -246,6 +253,7 @@ void loadCircuit(const char *file_name, ComponentArray *array)
             new_comp.type = POWERSUPPLY;
             new_comp.data.powersupply.id = id->valueint;
             new_comp.data.powersupply.voltage = cJSON_GetObjectItem(item, "voltage")->valuedouble;
+            new_comp.data.powersupply.pin1 = cJSON_GetObjectItem(item, "pin1")->valueint;
         }
         else if (strcmp(type->valuestring, "Resistor") == 0)
         {
@@ -253,14 +261,21 @@ void loadCircuit(const char *file_name, ComponentArray *array)
             new_comp.data.resistor.id = id->valueint;
             new_comp.data.resistor.resistance = cJSON_GetObjectItem(item, "resistance")->valuedouble;
             cJSON *out = cJSON_GetObjectItem(item, "output_type");
-            new_comp.data.resistor.output = (out && strcmp(out->valuestring, "Current") == 0) ? CALC_CURRENT : CALC_VOLTAGE;
+            new_comp.data.resistor.otype = (out && strcmp(out->valuestring, "Current") == 0) ? CALC_CURRENT : CALC_VOLTAGE;
+            new_comp.data.resistor.pin1 = cJSON_GetObjectItem(item, "pin1")->valueint;
+            new_comp.data.resistor.pin2 = cJSON_GetObjectItem(item, "pin2")->valueint;
         }
         else if (strcmp(type->valuestring, "Transistor") == 0)
         {
             new_comp.type = TRANSISTOR;
             new_comp.data.transistor.id = id->valueint;
-            new_comp.data.transistor.type = strcmp(cJSON_GetObjectItem(item, "transistor_type")->valuestring, "PNP") == 0;
-            new_comp.data.transistor.input_type = strcmp(cJSON_GetObjectItem(item, "input_output_format")->valuestring, "Current") == 0;
+            cJSON *ttype = cJSON_GetObjectItem(item, "transistor_type");
+            new_comp.data.transistor.type = (ttype && strcmp(ttype->valuestring, "PNP") == 0);
+            cJSON *io = cJSON_GetObjectItem(item, "input_output_format");
+            new_comp.data.transistor.input_type = (io && strcmp(io->valuestring, "Current") == 0);
+            new_comp.data.transistor.pin1 = cJSON_GetObjectItem(item, "pin1")->valueint;
+            new_comp.data.transistor.pin2 = cJSON_GetObjectItem(item, "pin2")->valueint;
+            new_comp.data.transistor.pin3 = cJSON_GetObjectItem(item, "pin3")->valueint;
         }
 
         addComponent(array, new_comp);
@@ -268,6 +283,43 @@ void loadCircuit(const char *file_name, ComponentArray *array)
 
     cJSON_Delete(root);
     printf("Circuit loaded from '%s'\n", file_name);
+}
+
+void list_components(ComponentArray *component_array)
+{
+    for (size_t i = 0; i < component_array->size; i++)
+    {
+        Component *c = &component_array->data[i];
+        printf("ID %zu - ", i);
+
+        switch(c->type)
+        {
+        case POWERSUPPLY:
+            printf("PowerSupply: %.2fV", c->data.powersupply.voltage);
+            if (c->data.powersupply.pin1 != -1)
+                printf(" (Connected to ID: %d)", c->data.powersupply.pin1);
+            break;
+        case RESISTOR:
+            printf("Resistor: %.2f Ohms, Output: %.2f %s",
+                           c->data.resistor.resistance,
+                           c->data.resistor.output,
+                           c->data.resistor.otype == CALC_VOLTAGE ? "V" : "A");
+            if (c->data.resistor.pin1 != -1 || c->data.resistor.pin2 != -1)
+                printf(" (Pins: %d, %d)", c->data.resistor.pin1, c->data.resistor.pin2);
+            break;
+        case TRANSISTOR:
+            printf("Transistor: %s, Output: %.2f",
+                           c->data.transistor.type ? "PNP" : "NPN",
+                           c->data.transistor.output);
+            if (c->data.transistor.pin1 != -1 || c->data.transistor.pin2 != -1 || c->data.transistor.pin3 != -1)
+                printf(" (Pins: %d, %d, %d)",
+                               c->data.transistor.pin1,
+                               c->data.transistor.pin2,
+                               c->data.transistor.pin3);
+            break;
+        }
+        printf("\n");
+    }
 }
 
 int main()
@@ -290,234 +342,273 @@ int main()
 
         switch (cmd)
         {
-        case 'A':
-            printf("Enter voltage: ");
-            if (fgets(input_buffer, sizeof(input_buffer), stdin) && sscanf(input_buffer, "%lf", &new_component.data.powersupply.voltage) == 1)
-            {
-                new_component.data.powersupply.id = component_array.size;
-                new_component.type = POWERSUPPLY;
-                addComponent(&component_array, new_component);
-                printf("Power Supply added.\n");
-            }
-            break;
-
-        case 'B':
-            printf("Enter resistance (Ohms): ");
-            if (fgets(input_buffer, sizeof(input_buffer), stdin) && sscanf(input_buffer, "%lf", &new_component.data.resistor.resistance) == 1)
-            {
-                new_component.data.resistor.id = component_array.size;
-                new_component.type = RESISTOR;
-                int otype = 0;
-                int iid = 0;
-
-                printf("0: Calc Voltage, 1: Calc Current: ");
-                if (fgets(input_buffer, sizeof(input_buffer), stdin))
-                    sscanf(input_buffer, "%d", &otype);
-                new_component.data.resistor.output = (otype == 1) ? CALC_CURRENT : CALC_VOLTAGE;
-
-                for(int i = 0; i < component_array.size; i++)
+            case 'A':
+                printf("Enter voltage: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin) && sscanf(input_buffer, "%lf", &new_component.data.powersupply.voltage) == 1)
                 {
-                    Component *c = &component_array.data[i];
-                    printf("ID %d - ", i);
+                    new_component.data.powersupply.id = component_array.size;
+                    new_component.data.powersupply.pin1 = -1;
+                    new_component.type = POWERSUPPLY;
+                    addComponent(&component_array, new_component);
+                    printf("Power Supply added.\n");
+                }
+                break;
 
-                    switch(c->type)
+            case 'B':
+                printf("Enter resistance (Ohms): ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin) && sscanf(input_buffer, "%lf", &new_component.data.resistor.resistance) == 1)
+                {
+                    new_component.data.resistor.id = component_array.size;
+                    new_component.type = RESISTOR;
+                    int otype = 0;
+                    int iid = -1;
+
+                    printf("0: Calc Voltage, 1: Calc Current: ");
+                    if (fgets(input_buffer, sizeof(input_buffer), stdin))
+                        sscanf(input_buffer, "%d", &otype);
+                    new_component.data.resistor.otype = (otype == 1) ? CALC_CURRENT : CALC_VOLTAGE;
+                    
+                    list_components(&component_array);
+                    printf("Enter Component ID to connect to: ");
+                    if (fgets(input_buffer, sizeof(input_buffer), stdin))
+                        sscanf(input_buffer, "%d", &iid);
+                    
+                    if (iid >= 0 && iid < component_array.size)
                     {
+                        Component *c = &component_array.data[iid];
+                        new_component.data.resistor.pin1 = iid;
+                        
+                        double input_value = 0.0;
+                        switch(c->type)
+                        {
                         case POWERSUPPLY:
-                            printf("PowerSupply voltage: %d", -c->data.powersupply.voltage);
-                            printf("PowerSupply voltage: %d", c->data.powersupply.voltage);
+                            input_value = c->data.powersupply.voltage;
                             break;
                         case TRANSISTOR:
-                            printf("Transistor output: %d", c->data.transistor.output);
+                            input_value = c->data.transistor.output;
                             break;
                         case RESISTOR:
-                            printf("Resistor output: %d", c->data.resistor.output);
+                            input_value = c->data.resistor.output;
                             break;
+                        }
+                        
+                        new_component.data.resistor.input = input_value;
+                        new_component.data.resistor.output = resistor_calc(
+                            new_component.data.resistor.resistance,
+                            input_value,
+                            new_component.data.resistor.otype
+                        );
+                        
+                        switch(c->type)
+                        {
+                        case POWERSUPPLY:
+                            c->data.powersupply.pin1 = component_array.size;
+                            break;
+                        case TRANSISTOR:
+                            if (c->data.transistor.pin1 == -1) c->data.transistor.pin1 = component_array.size;
+                            else if (c->data.transistor.pin2 == -1) c->data.transistor.pin2 = component_array.size;
+                            else if (c->data.transistor.pin3 == -1) c->data.transistor.pin3 = component_array.size;
+                            break;
+                        case RESISTOR:
+                            if (c->data.resistor.pin1 == -1) c->data.resistor.pin1 = component_array.size;
+                            else if (c->data.resistor.pin2 == -1) c->data.resistor.pin2 = component_array.size;
+                            break;
+                        }
                     }
+                    else
+                    {
+                        printf("Invalid component ID, using default input value\n");
+                        new_component.data.resistor.input = 5.0;
+                        new_component.data.resistor.output = resistor_calc(
+                            new_component.data.resistor.resistance,
+                            5.0,
+                            new_component.data.resistor.otype
+                        );
+                        new_component.data.resistor.pin1 = -1;
+                    }
+                    
+                    new_component.data.resistor.pin2 = -1;
+                    addComponent(&component_array, new_component);
+                    printf("Resistor added.\n");
                 }
+                break;
 
-                printf("Enter Component id:");
+            case 'C':
+                int ttype = 0, io = 0, iid = -1, bid = -1;
+                printf("0: NPN, 1: PNP: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin))
+                    sscanf(input_buffer, "%d", &ttype);
+                printf("0: Voltage input, 1: Current input: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin))
+                    sscanf(input_buffer, "%d", &io);
+
+                list_components(&component_array);
+                printf("Enter input component ID: ");
                 if (fgets(input_buffer, sizeof(input_buffer), stdin))
                     sscanf(input_buffer, "%d", &iid);
-                Component *c = &component_array.data[iid];
-                new_component.data.resistor.pin1 = iid;
-                switch(c->type)
+                
+                printf("Enter base component ID: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin))
+                    sscanf(input_buffer, "%d", &bid);
+
+                new_component.data.transistor.id = component_array.size;
+                new_component.data.transistor.type = ttype;
+                new_component.data.transistor.input_type = io;
+                new_component.data.transistor.pin1 = iid;
+                new_component.data.transistor.pin2 = bid;
+                new_component.data.transistor.pin3 = -1;
+                new_component.type = TRANSISTOR;
+
+                double input_value = 0.0;
+                double base_value = 0.0;
+                
+                if (iid >= 0 && iid < component_array.size)
                 {
+                    Component *c = &component_array.data[iid];
+                    switch(c->type)
+                    {
                     case POWERSUPPLY:
-                        new_component.data.resistor.input = c->data.powersupply.voltage;
-                        new_component.data.resistor.output = resistor(new_component.data.resistor.resistance, c->data.powersupply.voltage, otype);
+                        input_value = c->data.powersupply.voltage;
                         break;
                     case TRANSISTOR:
-                        new_component.data.resistor.input = c->data.transistor.output;
-                        new_component.data.resistor.output = resistor(new_component.data.resistor.resistance, c->data.transistor.output, otype);
-                        c->data.transistor.pin3 = component_array.size;
+                        input_value = c->data.transistor.output;
                         break;
                     case RESISTOR:
-
-                        new_component.data.resistor.input = c->data.resistor.output;
-                        new_component.data.resistor.output = resistor(new_component.data.resistor.resistance, c->data.resistor.output, otype);
-                        c->data.resistor.pin2 = component_array.size;
+                        input_value = c->data.resistor.output;
                         break;
+                    }
+                }
+                
+                if (bid >= 0 && bid < component_array.size)
+                {
+                    Component *c = &component_array.data[bid];
+                    switch(c->type)
+                    {
+                    case POWERSUPPLY:
+                        base_value = c->data.powersupply.voltage;
+                        break;
+                    case TRANSISTOR:
+                        base_value = c->data.transistor.output;
+                        break;
+                    case RESISTOR:
+                        base_value = c->data.resistor.output;
+                        break;
+                    }
+                }
+                
+                new_component.data.transistor.input = input_value;
+                new_component.data.transistor.base = base_value;
+                new_component.data.transistor.output = transistor_calc(
+                    input_value,
+                    base_value,
+                    new_component.data.transistor.type,
+                    new_component.data.transistor.input_type
+                );
+                
+                if (iid >= 0 && iid < component_array.size)
+                {
+                    Component *c = &component_array.data[iid];
+                    switch(c->type)
+                    {
+                    case POWERSUPPLY:
+                        c->data.powersupply.pin1 = component_array.size;
+                        break;
+                    case TRANSISTOR:
+                        if (c->data.transistor.pin1 == -1) c->data.transistor.pin1 = component_array.size;
+                        else if (c->data.transistor.pin2 == -1) c->data.transistor.pin2 = component_array.size;
+                        else if (c->data.transistor.pin3 == -1) c->data.transistor.pin3 = component_array.size;
+                        break;
+                    case RESISTOR:
+                        if (c->data.resistor.pin1 == -1) c->data.resistor.pin1 = component_array.size;
+                        else if (c->data.resistor.pin2 == -1) c->data.resistor.pin2 = component_array.size;
+                        break;
+                    }
+                }
+                
+                if (bid >= 0 && bid < component_array.size)
+                {
+                    Component *c = &component_array.data[bid];
+                    switch(c->type)
+                    {
+                    case POWERSUPPLY:
+                        c->data.powersupply.pin1 = component_array.size;
+                        break;
+                    case TRANSISTOR:
+                        if (c->data.transistor.pin1 == -1) c->data.transistor.pin1 = component_array.size;
+                        else if (c->data.transistor.pin2 == -1) c->data.transistor.pin2 = component_array.size;
+                        else if (c->data.transistor.pin3 == -1) c->data.transistor.pin3 = component_array.size;
+                        break;
+                    case RESISTOR:
+                        if (c->data.resistor.pin1 == -1) c->data.resistor.pin1 = component_array.size;
+                        else if (c->data.resistor.pin2 == -1) c->data.resistor.pin2 = component_array.size;
+                        break;
+                    }
                 }
                 
                 addComponent(&component_array, new_component);
-                printf("Resistor added.\n");
-            }
-            break;
+                printf("Transistor added.\n");
+                break;
 
-        case 'C':
-            printf("0: NPN, 1: PNP: ");
-            int ttype = 0, io = 0, iid = 0, bid = 0;
-            if (fgets(input_buffer, sizeof(input_buffer), stdin))
-                sscanf(input_buffer, "%d", &ttype);
-            printf("0: Voltage input, 1: Current input: ");
-            if (fgets(input_buffer, sizeof(input_buffer), stdin))
-                sscanf(input_buffer, "%d", &io);
-
-            printf("Enter input voltage: ");
-            for(int i = 0; i < component_array.size; i++)
-            {
-                Component *c = &component_array.data[i];
-                printf("ID %d - ", i);
-
-                switch(c->type)
+            case 'D':
+                int id = 0;
+                double led_current = 0.0;
+                
+                list_components(&component_array);
+                printf("Enter component ID to connect to LED: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin) && sscanf(input_buffer, "%d", &id) == 1)
                 {
-                    case POWERSUPPLY:
-                        printf("PowerSupply voltage: %d", -c->data.powersupply.voltage);
-                        printf("PowerSupply voltage: %d", c->data.powersupply.voltage);
-                        break;
-                    case TRANSISTOR:
-                        printf("Transistor output: %d", c->data.transistor.output);
-                        break;
-                    case RESISTOR:
-                        printf("Resistor output: %d", c->data.resistor.output);
-                        break;
+                    if (id >= 0 && id < component_array.size)
+                    {
+                        Component *c = &component_array.data[id];
+                        switch (c->type) {
+                        case POWERSUPPLY:
+                            led_current = c->data.powersupply.voltage;
+                            break;
+                        case TRANSISTOR:
+                            led_current = c->data.transistor.output;
+                            break;
+                        case RESISTOR:
+                            led_current = c->data.resistor.output;
+                            break;
+                        }
+                    }
                 }
-            }
-            if (fgets(input_buffer, sizeof(input_buffer), stdin))
-                sscanf(input_buffer, "%d", &iid);
-
-            printf("Enter base voltage: ");
-            for(int i = 0; i < component_array.size; i++)
-            {
-                Component *c = &component_array.data[i];
-                printf("ID %d - ", i);
-
-                switch(c->type)
-                {
-                    case POWERSUPPLY:
-                        printf("PowerSupply voltage: %d", -c->data.powersupply.voltage);
-                        printf("PowerSupply voltage: %d", c->data.powersupply.voltage);
-                        break;
-                    case TRANSISTOR:
-                        printf("Transistor output: %d", c->data.transistor.output);
-                        break;
-                    case RESISTOR:
-                        printf("Resistor output: %d", c->data.resistor.output);
-                        break;
-                }
-            }
-            if (fgets(input_buffer, sizeof(input_buffer), stdin))
-                sscanf(input_buffer, "%d", &bid);
-
-            new_component.data.transistor.id = component_array.size;
-            new_component.data.transistor.type = ttype;
-            new_component.data.transistor.input_type = io;
-            new_component.data.transistor.pin1 = iid;
-            new_component.data.transistor.pin2 = bid;
-
-            Component *c = &component_array.data[iid];
-            switch(c->type)
-            {
-                case POWERSUPPLY:
-                    new_component.data.transistor.input = c->data.powersupply.voltage;
-                    break;
-                case TRANSISTOR:
-                    new_component.data.transistor.input = c->data.transistor.output;
-                    break;
-                case RESISTOR:
-                    new_component.data.transistor.input = c->data.resistor.output;
-                    break;
-            }
-
-            c = &component_array.data[bid];
-            switch(c->type)
-            {
-                case POWERSUPPLY:
-                    new_component.data.transistor.base = c->data.powersupply.voltage;
-                    break;
-                case TRANSISTOR:
-                    new_component.data.transistor.base = c->data.transistor.output;
-                    break;
-                case RESISTOR:
-                    new_component.data.transistor.base = c->data.resistor.output;
-                    break;
-            }
-
-            new_component.data.transistor.output = transistor(new_component.data.transistor.input, new_component.data.transistor.base, new_component.data.transistor.type, new_component.data.transistor.input_type);
-            new_component.type = TRANSISTOR;
-            addComponent(&component_array, new_component);
-            printf("Transistor added.\n");
-            break;
-
-        case 'D':
-            printf("Enter current for LED (A): ");
-            double led_current;
-            if (fgets(input_buffer, sizeof(input_buffer), stdin) && sscanf(input_buffer, "%lf", &led_current) == 1)
+                
+                printf("LED current: %.3f A - ", led_current);
                 printf(led_bulb(led_current) ? "LED ON\n" : "LED OFF or Burned\n");
-            break;
+                break;
 
-        case 'L':
-            for (size_t i = 0; i < component_array.size; i++)
+            case 'L':
+                list_components(&component_array);
+                break;
 
-            {
-                Component *c = &component_array.data[i];
-                printf("ID %d - ", c->data.powersupply.id);
-                switch (c->type)
+            case 'S':
+                printf("Filename to save: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin))
                 {
-                case POWERSUPPLY:
-                    printf("PowerSupply: %.2fV\n", c->data.powersupply.voltage);
-                    break;
-                case RESISTOR:
-                    printf("Resistor: %.2f Ohms (%s)\n", c->data.resistor.resistance,
-                           c->data.resistor.output == CALC_VOLTAGE ? "Voltage" : "Current");
-                    break;
-                case TRANSISTOR:
-                    printf("Transistor: %s, Input: %s\n",
-                           c->data.transistor.type ? "PNP" : "NPN",
-                           c->data.transistor.input_type ? "Current" : "Voltage");
-                    break;
+                    input_buffer[strcspn(input_buffer, "\n")] = 0;
+                    saveCircuit(input_buffer, &component_array);
                 }
-            }
-            break;
+                break;
 
-        case 'S':
-            printf("Filename to save: ");
-            if (fgets(input_buffer, sizeof(input_buffer), stdin))
-            {
-                input_buffer[strcspn(input_buffer, "\n")] = 0;
-                saveCircuit(input_buffer, &component_array);
-            }
-            break;
+            case 'F':
+                printf("Filename to load: ");
+                if (fgets(input_buffer, sizeof(input_buffer), stdin))
+                {
+                    input_buffer[strcspn(input_buffer, "\n")] = 0;
+                    loadCircuit(input_buffer, &component_array);
+                }
+                break;
 
-        case 'F':
-            printf("Filename to load: ");
-            if (fgets(input_buffer, sizeof(input_buffer), stdin))
-            {
-                input_buffer[strcspn(input_buffer, "\n")] = 0;
-                loadCircuit(input_buffer, &component_array);
-            }
-            break;
+            case 'Q':
+                quit = true;
+                break;
 
-        case 'Q':
-            quit = true;
-            break;
-
-        default:
-            printf("Invalid option.\n");
-            break;
+            default:
+                printf("Invalid option.\n");
+                break;
         }
     }
-
     freeComponentArray(&component_array);
     printf("Goodbye!\n");
     return 0;
